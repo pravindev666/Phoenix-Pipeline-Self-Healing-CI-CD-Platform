@@ -1,75 +1,73 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Phoenix - ECS Cluster with Fargate, ALB, Target Groups, TaskDefinition and Service'
+Description: 'Phoenix Pipeline - ECS Cluster with Fargate, ALB, and Networking Infrastructure'
 
 Parameters:
   Environment:
     Type: String
-    Description: Environment name (affects resource tags/names)
     Default: production
     AllowedValues:
       - development
       - staging
       - production
+    Description: Deployment environment
 
   VpcCIDR:
     Type: String
-    Description: CIDR block for VPC
     Default: 10.0.0.0/16
+    Description: CIDR block for VPC
 
   PublicSubnet1CIDR:
     Type: String
-    Description: CIDR block for public subnet 1
     Default: 10.0.1.0/24
+    Description: CIDR block for public subnet in AZ1
 
   PublicSubnet2CIDR:
     Type: String
-    Description: CIDR block for public subnet 2
     Default: 10.0.2.0/24
+    Description: CIDR block for public subnet in AZ2
 
   PrivateSubnet1CIDR:
     Type: String
-    Description: CIDR block for private subnet 1
     Default: 10.0.11.0/24
+    Description: CIDR block for private subnet in AZ1
 
   PrivateSubnet2CIDR:
     Type: String
-    Description: CIDR block for private subnet 2
     Default: 10.0.12.0/24
+    Description: CIDR block for private subnet in AZ2
 
   ContainerPort:
     Type: Number
-    Description: Port on which the application container listens
     Default: 5000
+    Description: Port on which the application container listens
 
   DesiredCount:
     Type: Number
-    Description: Desired number of tasks
     Default: 2
+    Description: Desired number of ECS tasks
 
-  ContainerCpu:
-    Type: Number
-    Description: CPU units for the task (256 = 0.25 vCPU)
-    Default: 256
-    AllowedValues: [256, 512, 1024, 2048, 4096]
-
-  ContainerMemory:
-    Type: Number
-    Description: Memory for the task in MB
-    Default: 512
-    AllowedValues: [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
-
-  ECSClusterName:
+  TaskCPU:
     Type: String
-    Description: ECS cluster name
-    Default: sample-app-cluster
+    Default: '512'
+    AllowedValues:
+      - '256'
+      - '512'
+      - '1024'
+      - '2048'
+    Description: Task CPU units (1024 = 1 vCPU)
 
-  ECSServiceName:
+  TaskMemory:
     Type: String
-    Description: ECS service name
-    Default: sample-app-service
+    Default: '1024'
+    AllowedValues:
+      - '512'
+      - '1024'
+      - '2048'
+      - '4096'
+    Description: Task memory in MB
 
 Resources:
-  ### Networking / VPC
+  # VPC Configuration
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -79,99 +77,130 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-vpc-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
         - Key: Environment
           Value: !Ref Environment
 
+  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-igw-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
-  AttachGateway:
+  InternetGatewayAttachment:
     Type: AWS::EC2::VPCGatewayAttachment
     Properties:
-      VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
 
+  # Public Subnets
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PublicSubnet1CIDR
       AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-public-subnet-1-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
   PublicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PublicSubnet2CIDR
       AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-public-subnet-2-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
+  # Private Subnets
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PrivateSubnet1CIDR
       AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-private-subnet-1-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
   PrivateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
-      CidrBlock: !Ref PrivateSubnet2CIDR
       AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-private-subnet-2-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
+  # NAT Gateways for Private Subnets
   NatGateway1EIP:
     Type: AWS::EC2::EIP
-    DependsOn: AttachGateway
+    DependsOn: InternetGatewayAttachment
     Properties:
       Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'phoenix-nat-eip-1-${Environment}'
 
   NatGateway2EIP:
     Type: AWS::EC2::EIP
-    DependsOn: AttachGateway
+    DependsOn: InternetGatewayAttachment
     Properties:
       Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub 'phoenix-nat-eip-2-${Environment}'
 
   NatGateway1:
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatGateway1EIP.AllocationId
       SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub 'phoenix-nat-1-${Environment}'
 
   NatGateway2:
     Type: AWS::EC2::NatGateway
     Properties:
       AllocationId: !GetAtt NatGateway2EIP.AllocationId
       SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub 'phoenix-nat-2-${Environment}'
 
+  # Public Route Table
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-public-rt-${Environment}'
+          Value: !Sub 'phoenix-public-routes-${Environment}'
 
   DefaultPublicRoute:
     Type: AWS::EC2::Route
-    DependsOn: AttachGateway
+    DependsOn: InternetGatewayAttachment
     Properties:
       RouteTableId: !Ref PublicRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -189,13 +218,14 @@ Resources:
       RouteTableId: !Ref PublicRouteTable
       SubnetId: !Ref PublicSubnet2
 
+  # Private Route Tables
   PrivateRouteTable1:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-private-rt-1-${Environment}'
+          Value: !Sub 'phoenix-private-routes-1-${Environment}'
 
   DefaultPrivateRoute1:
     Type: AWS::EC2::Route
@@ -216,7 +246,7 @@ Resources:
       VpcId: !Ref VPC
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-private-rt-2-${Environment}'
+          Value: !Sub 'phoenix-private-routes-2-${Environment}'
 
   DefaultPrivateRoute2:
     Type: AWS::EC2::Route
@@ -231,10 +261,11 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable2
       SubnetId: !Ref PrivateSubnet2
 
-  ### Security Groups
+  # Security Groups
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      GroupName: !Sub 'phoenix-alb-sg-${Environment}'
       GroupDescription: Security group for Application Load Balancer
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -242,17 +273,26 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
+          Description: Allow HTTP from internet
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS from internet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-alb-sg-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
-  ECSSecurityGroup:
+  ECSTaskSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
+      GroupName: !Sub 'phoenix-ecs-task-sg-${Environment}'
       GroupDescription: Security group for ECS tasks
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -260,11 +300,18 @@ Resources:
           FromPort: !Ref ContainerPort
           ToPort: !Ref ContainerPort
           SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow traffic from ALB
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-ecs-sg-${Environment}'
+          Value: !Sub 'phoenix-ecs-task-sg-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
-  ### ALB + Target Groups + Listener
+  # Application Load Balancer
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -280,7 +327,10 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-alb-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
+  # Target Groups for Blue-Green Deployment
   TargetGroupBlue:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -297,10 +347,12 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher:
-        HttpCode: '200'
+        HttpCode: 200
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-tg-blue-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
   TargetGroupGreen:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -318,41 +370,53 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher:
-        HttpCode: '200'
+        HttpCode: 200
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-tg-green-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
-  ALBListener:
+  # ALB Listeners
+  ALBListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
-      DefaultActions:
-        - Type: forward
-          TargetGroupArn: !Ref TargetGroupBlue
       LoadBalancerArn: !Ref ApplicationLoadBalancer
       Port: 80
       Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupBlue
 
-  ### ECS cluster, task roles and task definition
+  # ECS Cluster
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Ref ECSClusterName
+      ClusterName: sample-app-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
       DefaultCapacityProviderStrategy:
         - CapacityProvider: FARGATE
           Weight: 1
-        - CapacityProvider: FARGATE_SPOT
-          Weight: 1
-      ClusterSettings:
-        - Name: containerInsights
-          Value: enabled
+          Base: 1
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-cluster-${Environment}'
+          Value: !Sub 'phoenix-ecs-cluster-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
+  # CloudWatch Log Group for ECS Tasks
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/sample-app
+      RetentionInDays: 7
+
+  # IAM Role for ECS Task Execution
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -377,11 +441,17 @@ Resources:
                   - ecr:BatchCheckLayerAvailability
                   - ecr:GetDownloadUrlForLayer
                   - ecr:BatchGetImage
-                  - logs:CreateLogGroup
+                Resource: '*'
+              - Effect: Allow
+                Action:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: '*'
+                Resource: !GetAtt ECSLogGroup.Arn
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
 
+  # IAM Role for ECS Tasks
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -404,81 +474,46 @@ Resources:
                   - logs:CreateLogStream
                   - logs:PutLogEvents
                 Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
 
-  LogGroup:
-    Type: AWS::Logs::LogGroup
+  # ECR Repository
+  ECRRepository:
+    Type: AWS::ECR::Repository
     Properties:
-      LogGroupName: /ecs/sample-app
-      RetentionInDays: 7
-
-  TaskDefinition:
-    Type: AWS::ECS::TaskDefinition
-    Properties:
-      Family: sample-app-task
-      NetworkMode: awsvpc
-      RequiresCompatibilities:
-        - FARGATE
-      Cpu: !Ref ContainerCpu
-      Memory: !Ref ContainerMemory
-      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt ECSTaskRole.Arn
-      ContainerDefinitions:
-        - Name: sample-app
-          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/sample-python-app:latest'
-          PortMappings:
-            - ContainerPort: !Ref ContainerPort
-              Protocol: tcp
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: !Ref LogGroup
-              awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: ecs
-          Environment:
-            - Name: ENVIRONMENT
-              Value: !Ref Environment
-            - Name: PORT
-              Value: !Ref ContainerPort
-          HealthCheck:
-            Command:
-              - CMD-SHELL
-              - !Sub 'curl -f http://localhost:${ContainerPort}/health || exit 1'
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 60
-
-  ECSService:
-    Type: AWS::ECS::Service
-    DependsOn: ALBListener
-    Properties:
-      ServiceName: !Ref ECSServiceName
-      Cluster: !Ref ECSCluster
-      TaskDefinition: !Ref TaskDefinition
-      DesiredCount: !Ref DesiredCount
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: DISABLED
-          Subnets:
-            - !Ref PrivateSubnet1
-            - !Ref PrivateSubnet2
-          SecurityGroups:
-            - !Ref ECSSecurityGroup
-      LoadBalancers:
-        - ContainerName: sample-app
-          ContainerPort: !Ref ContainerPort
-          TargetGroupArn: !Ref TargetGroupBlue
-      HealthCheckGracePeriodSeconds: 60
-      DeploymentConfiguration:
-        MaximumPercent: 200
-        MinimumHealthyPercent: 100
-        DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
+      RepositoryName: sample-python-app
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
       Tags:
         - Key: Name
-          Value: !Sub 'phoenix-service-${Environment}'
+          Value: !Sub 'phoenix-ecr-${Environment}'
+        - Key: Project
+          Value: PhoenixPipeline
 
 Outputs:
   VPCId:
@@ -487,47 +522,17 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-VPC'
 
-  ClusterName:
-    Description: ECS Cluster Name
-    Value: !Ref ECSCluster
+  PublicSubnet1Id:
+    Description: Public Subnet 1 ID
+    Value: !Ref PublicSubnet1
     Export:
-      Name: !Sub '${AWS::StackName}-ClusterName'
+      Name: !Sub '${AWS::StackName}-PublicSubnet1'
 
-  ServiceName:
-    Description: ECS Service Name
-    Value: !GetAtt ECSService.Name
+  PublicSubnet2Id:
+    Description: Public Subnet 2 ID
+    Value: !Ref PublicSubnet2
     Export:
-      Name: !Sub '${AWS::StackName}-ServiceName'
-
-  LoadBalancerDNS:
-    Description: DNS name of the load balancer
-    Value: !GetAtt ApplicationLoadBalancer.DNSName
-    Export:
-      Name: !Sub '${AWS::StackName}-LoadBalancerDNS'
-
-  TargetGroupBlueArn:
-    Description: ARN of Blue Target Group
-    Value: !Ref TargetGroupBlue
-    Export:
-      Name: !Sub '${AWS::StackName}-TargetGroupBlue'
-
-  TargetGroupGreenArn:
-    Description: ARN of Green Target Group
-    Value: !Ref TargetGroupGreen
-    Export:
-      Name: !Sub '${AWS::StackName}-TargetGroupGreen'
-
-  TaskDefinitionArn:
-    Description: ARN of the task definition
-    Value: !Ref TaskDefinition
-    Export:
-      Name: !Sub '${AWS::StackName}-TaskDefinition'
-
-  ECSSecurityGroupId:
-    Description: Security Group ID for ECS tasks
-    Value: !Ref ECSSecurityGroup
-    Export:
-      Name: !Sub '${AWS::StackName}-ECSSecurityGroup'
+      Name: !Sub '${AWS::StackName}-PublicSubnet2'
 
   PrivateSubnet1Id:
     Description: Private Subnet 1 ID
@@ -541,6 +546,80 @@ Outputs:
     Export:
       Name: !Sub '${AWS::StackName}-PrivateSubnet2'
 
-  ApplicationURL:
-    Description: URL to access the application (HTTP)
-    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+  ECSClusterName:
+    Description: ECS Cluster Name
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSCluster'
+
+  ECSClusterArn:
+    Description: ECS Cluster ARN
+    Value: !GetAtt ECSCluster.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSClusterArn'
+
+  ALBArn:
+    Description: Application Load Balancer ARN
+    Value: !Ref ApplicationLoadBalancer
+    Export:
+      Name: !Sub '${AWS::StackName}-ALB'
+
+  ALBDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBDNSName'
+
+  TargetGroupBlueArn:
+    Description: Blue Target Group ARN
+    Value: !Ref TargetGroupBlue
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupBlue'
+
+  TargetGroupGreenArn:
+    Description: Green Target Group ARN
+    Value: !Ref TargetGroupGreen
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupGreen'
+
+  ALBListenerArn:
+    Description: ALB Listener ARN
+    Value: !Ref ALBListenerHTTP
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBListener'
+
+  ECSTaskSecurityGroupId:
+    Description: ECS Task Security Group ID
+    Value: !Ref ECSTaskSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSTaskSecurityGroup'
+
+  ECSTaskExecutionRoleArn:
+    Description: ECS Task Execution Role ARN
+    Value: !GetAtt ECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSTaskExecutionRole'
+
+  ECSTaskRoleArn:
+    Description: ECS Task Role ARN
+    Value: !GetAtt ECSTaskRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSTaskRole'
+
+  ECRRepositoryUri:
+    Description: ECR Repository URI
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  ECRRepositoryArn:
+    Description: ECR Repository ARN
+    Value: !GetAtt ECRRepository.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryArn'
+
+  ECSLogGroupName:
+    Description: ECS Log Group Name
+    Value: !Ref ECSLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSLogGroup'
