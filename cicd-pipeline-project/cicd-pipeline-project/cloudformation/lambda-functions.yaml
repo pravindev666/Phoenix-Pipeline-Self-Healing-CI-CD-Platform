@@ -1,1 +1,406 @@
 
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Phoenix Pipeline - Lambda Functions for Health Checks and Auto Rollback'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - development
+      - staging
+      - production
+    Description: Deployment environment
+  
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket containing Lambda deployment packages
+  
+  ClusterName:
+    Type: String
+    Default: sample-app-cluster
+    Description: ECS cluster name
+  
+  ServiceName:
+    Type: String
+    Default: sample-app-service
+    Description: ECS service name
+  
+  SNSTopicName:
+    Type: String
+    Default: phoenix-deployment-notifications
+    Description: SNS topic name for notifications
+
+Resources:
+  # SNS Topic for Deployment Notifications
+  DeploymentNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Ref SNSTopicName
+      DisplayName: Phoenix Pipeline Deployment Notifications
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  NotificationEmail:
+    Type: String
+    Default: devops@example.com
+    Description: Email address for deployment notifications
+
+  # IAM Role for Health Check Lambda
+  HealthCheckLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'phoenix-health-check-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: HealthCheckPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                  - ecs:DescribeTaskDefinition
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:CreateNetworkInterface
+                  - ec2:DeleteNetworkInterface
+                  - ec2:DescribeInstances
+                  - ec2:AttachNetworkInterface
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # IAM Role for Auto Rollback Lambda
+  AutoRollbackLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'phoenix-auto-rollback-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AutoRollbackPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:UpdateService
+                  - ecs:DescribeTaskDefinition
+                  - ecs:ListTaskDefinitions
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codedeploy:GetDeployment
+                  - codedeploy:StopDeployment
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref DeploymentNotificationTopic
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*'
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Group for Health Check Lambda
+  HealthCheckLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/phoenix-health-check
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudWatch Log Group for Auto Rollback Lambda
+  AutoRollbackLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/phoenix-auto-rollback
+      RetentionInDays: 7
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Health Check Lambda Function
+  HealthCheckFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: phoenix-health-check
+      Runtime: python3.9
+      Handler: health_check.lambda_handler
+      Role: !GetAtt HealthCheckLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ClusterName
+          SERVICE_NAME: !Ref ServiceName
+          HEALTH_ENDPOINT: /health
+          ENVIRONMENT: !Ref Environment
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: health_check.zip
+      Description: Performs health checks on ECS service and publishes metrics
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Auto Rollback Lambda Function
+  AutoRollbackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: phoenix-auto-rollback
+      Runtime: python3.9
+      Handler: auto_rollback.lambda_handler
+      Role: !GetAtt AutoRollbackLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          CLUSTER_NAME: !Ref ClusterName
+          SERVICE_NAME: !Ref ServiceName
+          SNS_TOPIC_ARN: !Ref DeploymentNotificationTopic
+          ENVIRONMENT: !Ref Environment
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: auto_rollback.zip
+      Description: Triggers automatic rollback when deployment fails
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # EventBridge Rule to trigger Health Check every minute
+  HealthCheckScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: phoenix-health-check-schedule
+      Description: Triggers health check Lambda every minute
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt HealthCheckFunction.Arn
+          Id: HealthCheckTarget
+
+  # Permission for EventBridge to invoke Health Check Lambda
+  HealthCheckInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthCheckFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HealthCheckScheduleRule.Arn
+
+  # CloudWatch Alarm for Deployment Health
+  DeploymentHealthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: phoenix-deployment-health-alarm
+      AlarmDescription: Triggers rollback when health checks fail
+      MetricName: HealthCheckStatus
+      Namespace: CustomApp/Health
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 0.5
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref DeploymentNotificationTopic
+        - !GetAtt AutoRollbackFunction.Arn
+      OKActions:
+        - !Ref DeploymentNotificationTopic
+      Tags:
+        - Key: Project
+          Value: PhoenixPipeline
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Permission for CloudWatch Alarm to invoke Auto Rollback Lambda
+  AutoRollbackInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutoRollbackFunction
+      Action: lambda:InvokeFunction
+      Principal: lambda.alarms.cloudwatch.amazonaws.com
+      SourceArn: !GetAtt DeploymentHealthAlarm.Arn
+
+  # SNS Topic Policy to allow CloudWatch to publish
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref DeploymentNotificationTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - SNS:Publish
+            Resource: !Ref DeploymentNotificationTopic
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - SNS:Publish
+            Resource: !Ref DeploymentNotificationTopic
+
+  # CloudWatch Dashboard for Monitoring
+  PhoenixPipelineDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: phoenix-pipeline-monitoring
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["CustomApp/Health", "HealthCheckStatus", {"stat": "Average", "label": "Health Status"}],
+                  [".", "HealthyTasks", {"stat": "Average", "label": "Healthy Tasks"}],
+                  [".", "TotalTasks", {"stat": "Average", "label": "Total Tasks"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Deployment Health Metrics",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["CustomApp/Health", "ResponseTime", {"stat": "Average", "label": "Avg Response Time"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Application Response Time",
+                "period": 60,
+                "yAxis": {
+                  "left": {
+                    "label": "Milliseconds"
+                  }
+                }
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/lambda/phoenix-health-check'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Health Check Logs"
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/lambda/phoenix-auto-rollback'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Rollback Events"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  HealthCheckFunctionArn:
+    Description: ARN of the Health Check Lambda function
+    Value: !GetAtt HealthCheckFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthCheckFunctionArn'
+
+  AutoRollbackFunctionArn:
+    Description: ARN of the Auto Rollback Lambda function
+    Value: !GetAtt AutoRollbackFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AutoRollbackFunctionArn'
+
+  DeploymentNotificationTopicArn:
+    Description: ARN of the SNS topic for deployment notifications
+    Value: !Ref DeploymentNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopicArn'
+
+  DeploymentHealthAlarmArn:
+    Description: ARN of the CloudWatch alarm for deployment health
+    Value: !GetAtt DeploymentHealthAlarm.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthAlarmArn'
+
+  HealthCheckLambdaRoleArn:
+    Description: ARN of the Health Check Lambda IAM role
+    Value: !GetAtt HealthCheckLambdaRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-HealthCheckRoleArn'
+
+  AutoRollbackLambdaRoleArn:
+    Description: ARN of the Auto Rollback Lambda IAM role
+    Value: !GetAtt AutoRollbackLambdaRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AutoRollbackRoleArn'
+
+  DashboardURL:
+    Description: URL to the CloudWatch Dashboard
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=phoenix-pipeline-monitoring'
