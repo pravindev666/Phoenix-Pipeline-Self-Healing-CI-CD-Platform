@@ -1,1 +1,103 @@
-
+{
+  "family": "sample-app-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/phoenix-ecs-task-execution-role-production",
+  "taskRoleArn": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/phoenix-ecs-task-role-production",
+  "containerDefinitions": [
+    {
+      "name": "sample-app",
+      "image": "<IMAGE_URI>",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 5000,
+          "hostPort": 5000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "ENVIRONMENT",
+          "value": "production"
+        },
+        {
+          "name": "APP_NAME",
+          "value": "Phoenix Pipeline"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        },
+        {
+          "name": "PORT",
+          "value": "5000"
+        },
+        {
+          "name": "WORKERS",
+          "value": "4"
+        }
+      ],
+      "secrets": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/sample-app",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "curl -f http://localhost:5000/health || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 60
+      },
+      "stopTimeout": 30,
+      "mountPoints": [],
+      "volumesFrom": [],
+      "dependsOn": [],
+      "ulimits": [
+        {
+          "name": "nofile",
+          "softLimit": 65536,
+          "hardLimit": 65536
+        }
+      ],
+      "readonlyRootFilesystem": false,
+      "privileged": false,
+      "user": "1000"
+    }
+  ],
+  "volumes": [],
+  "placementConstraints": [],
+  "tags": [
+    {
+      "key": "Project",
+      "value": "PhoenixPipeline"
+    },
+    {
+      "key": "ManagedBy",
+      "value": "CodePipeline"
+    },
+    {
+      "key": "Environment",
+      "value": "production"
+    }
+  ],
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "ephemeralStorage": {
+    "sizeInGiB": 21
+  }
+}
