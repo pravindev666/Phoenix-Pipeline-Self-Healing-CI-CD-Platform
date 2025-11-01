@@ -1,1 +1,254 @@
 
+version: 0.0
+# AppSpec file for AWS CodeDeploy ECS Blue-Green Deployment
+# This file defines the deployment lifecycle hooks and configuration
+
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: <TASK_DEFINITION>
+        LoadBalancerInfo:
+          ContainerName: "sample-app"
+          ContainerPort: 5000
+        PlatformVersion: "LATEST"
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            Subnets:
+              - <PRIVATE_SUBNET_1>
+              - <PRIVATE_SUBNET_2>
+            SecurityGroups:
+              - <SECURITY_GROUP>
+            AssignPublicIp: DISABLED
+
+Hooks:
+  # Hook: BeforeInstall
+  # Runs before the replacement task set is created
+  # Use this to perform pre-deployment validations or setup
+  - BeforeInstall: "BeforeInstallHook"
+  
+  # Hook: AfterInstall
+  # Runs after the replacement task set is created but before test traffic is served
+  # Use this to perform initial application setup or configuration
+  - AfterInstall: "AfterInstallHook"
+  
+  # Hook: AfterAllowTestTraffic
+  # Runs after test traffic is served to the replacement task set
+  # Use this to run validation tests on the new deployment
+  - AfterAllowTestTraffic: "AfterAllowTestTrafficHook"
+  
+  # Hook: BeforeAllowTraffic
+  # Runs before production traffic is shifted to the replacement task set
+  # Use this for final validation before production traffic
+  - BeforeAllowTraffic: "BeforeAllowTrafficHook"
+  
+  # Hook: AfterAllowTraffic
+  # Runs after production traffic is shifted to the replacement task set
+  # Use this to verify the deployment is serving production traffic correctly
+  - AfterAllowTraffic: "AfterAllowTrafficHook"
+
+# Deployment Configuration
+# These settings control how the blue-green deployment behaves
+
+# Traffic Routing Configuration (defined in CodeDeploy deployment group)
+# - Type: TimeBasedCanary | TimeBasedLinear | AllAtOnce
+# - TimeBasedCanary: Shifts traffic in two increments
+#   Example: 10% after 5 minutes, then 90% after another 5 minutes
+# - TimeBasedLinear: Shifts traffic in equal increments
+#   Example: 10% every 1 minute until 100%
+# - AllAtOnce: Shifts all traffic immediately
+
+# Automatic Rollback Configuration
+# Rollback triggers:
+# - DEPLOYMENT_FAILURE: Deployment fails during any lifecycle hook
+# - DEPLOYMENT_STOP_ON_ALARM: CloudWatch alarm triggers during deployment
+# - DEPLOYMENT_STOP_ON_REQUEST: Manual stop requested
+
+# Lifecycle Hook Functions
+# These Lambda functions are invoked at each deployment stage
+# They should return success/failure to control deployment flow
+
+# BeforeInstallHook:
+# Purpose: Pre-deployment validation
+# Tasks:
+# - Verify infrastructure readiness
+# - Check dependent services availability
+# - Validate configuration parameters
+# - Ensure sufficient capacity
+# Expected output: Succeed or Fail
+
+# AfterInstallHook:
+# Purpose: Post-installation setup
+# Tasks:
+# - Initialize application state
+# - Warm up caches
+# - Perform smoke tests
+# - Validate container health
+# Expected output: Succeed or Fail
+
+# AfterAllowTestTrafficHook:
+# Purpose: Test traffic validation
+# Tasks:
+# - Run integration tests
+# - Verify API endpoints
+# - Check database connections
+# - Validate external service integrations
+# Expected output: Succeed or Fail
+
+# BeforeAllowTrafficHook:
+# Purpose: Pre-production validation
+# Tasks:
+# - Final health checks
+# - Performance validation
+# - Security scans
+# - Load testing (if applicable)
+# Expected output: Succeed or Fail
+
+# AfterAllowTrafficHook:
+# Purpose: Post-deployment verification
+# Tasks:
+# - Monitor error rates
+# - Verify metrics
+# - Check logs for errors
+# - Confirm successful traffic shift
+# Expected output: Succeed or Fail
+
+# Hook Function Implementation Guidelines:
+# 1. Each hook must complete within the specified timeout (default: 3600 seconds)
+# 2. Functions should return lifecycle event status: Succeeded, Failed, or InProgress
+# 3. Use CodeDeploy PutLifecycleEventHookExecutionStatus API to report status
+# 4. Implement proper error handling and logging
+# 5. Make hooks idempotent (safe to retry)
+
+# Example Hook Function Response:
+# {
+#   "deploymentId": "d-1234567890",
+#   "lifecycleEventHookExecutionId": "h-1234567890",
+#   "status": "Succeeded" | "Failed" | "InProgress"
+# }
+
+# Blue-Green Deployment Phases:
+# 
+# Phase 1: BEFORE_INSTALL
+# - Original tasks (Green) running
+# - BeforeInstall hook executes
+# - Validates pre-deployment conditions
+#
+# Phase 2: INSTALL
+# - New task set (Blue) is created
+# - Containers are started
+# - Health checks begin
+#
+# Phase 3: AFTER_INSTALL
+# - Blue tasks are running
+# - AfterInstall hook executes
+# - Application initialization occurs
+#
+# Phase 4: ALLOW_TEST_TRAFFIC
+# - Test listener routes traffic to Blue
+# - AfterAllowTestTraffic hook executes
+# - Integration tests run
+#
+# Phase 5: BEFORE_ALLOW_TRAFFIC
+# - BeforeAllowTraffic hook executes
+# - Final validation before production
+# - Both Green and Blue are running
+#
+# Phase 6: ALLOW_TRAFFIC
+# - Production listener routes to Blue
+# - Traffic shifts according to configuration
+# - Green tasks remain running
+#
+# Phase 7: AFTER_ALLOW_TRAFFIC
+# - AfterAllowTraffic hook executes
+# - Monitoring and verification
+# - Deployment marked as successful
+#
+# Phase 8: TERMINATE
+# - Green task set is terminated
+# - Resources are cleaned up
+# - Deployment complete
+
+# Rollback Behavior:
+# If any hook fails or CloudWatch alarm triggers:
+# 1. Traffic is immediately shifted back to Green
+# 2. Blue task set is terminated
+# 3. Rollback notification is sent
+# 4. Original Green tasks continue serving traffic
+# 5. Deployment is marked as failed
+
+# Best Practices:
+# 1. Keep hooks fast and focused (< 5 minutes per hook)
+# 2. Implement comprehensive logging in all hooks
+# 3. Use CloudWatch alarms to monitor deployment health
+# 4. Configure appropriate timeouts for each hook
+# 5. Test hooks thoroughly in non-production environments
+# 6. Implement graceful degradation in validation tests
+# 7. Use feature flags for risky changes
+# 8. Monitor key metrics during traffic shift
+# 9. Have a manual rollback plan as backup
+# 10. Document hook behavior and dependencies
+
+# Environment Variables for Hooks:
+# AWS_REGION: AWS region for the deployment
+# DEPLOYMENT_ID: Unique identifier for this deployment
+# LIFECYCLE_EVENT: Current lifecycle event name
+# APPLICATION_NAME: CodeDeploy application name
+# DEPLOYMENT_GROUP_NAME: CodeDeploy deployment group name
+# TASK_SET_ID: ECS task set identifier
+
+# Monitoring During Deployment:
+# Key metrics to watch:
+# - HTTP error rates (4xx, 5xx)
+# - Response time (p50, p95, p99)
+# - Request count
+# - CPU and memory utilization
+# - Active connections
+# - Database query performance
+# - External API latency
+
+# Deployment Timeout Configuration:
+# Total deployment timeout: 1 hour (default)
+# Can be extended up to 2 days
+# Individual hook timeout: 3600 seconds (default)
+# Traffic shift timeout: Depends on configuration
+
+# Security Considerations:
+# 1. Ensure hook Lambda functions have minimal IAM permissions
+# 2. Encrypt sensitive data in environment variables
+# 3. Use VPC endpoints for private communication
+# 4. Implement proper authentication for API calls
+# 5. Validate input from external sources
+# 6. Use AWS Secrets Manager for credentials
+# 7. Enable CloudTrail logging for audit
+
+# Cost Optimization:
+# 1. Minimize hook execution time
+# 2. Use appropriate Lambda memory allocation
+# 3. Clean up resources promptly after deployment
+# 4. Consider using FARGATE_SPOT for cost savings
+# 5. Monitor NAT Gateway data transfer costs
+
+# Troubleshooting Guide:
+# Issue: Deployment stuck in BEFORE_INSTALL
+# - Check hook Lambda function logs
+# - Verify IAM permissions
+# - Ensure function doesn't timeout
+#
+# Issue: Tasks failing health checks
+# - Verify target group health check configuration
+# - Check application /health endpoint
+# - Review container logs
+# - Verify security group rules
+#
+# Issue: Rollback triggered unexpectedly
+# - Check CloudWatch alarm configuration
+# - Review alarm history
+# - Verify metric thresholds
+# - Check application logs for errors
+#
+# Issue: Slow traffic shift
+# - Review traffic routing configuration
+# - Check ALB target health
+# - Verify instance capacity
+# - Monitor connection draining
