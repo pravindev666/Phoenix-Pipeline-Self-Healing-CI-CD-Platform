@@ -1,11 +1,10 @@
-
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Phoenix Pipeline - ECS Cluster with Fargate and Application Load Balancer'
+Description: 'Phoenix - ECS Cluster with Fargate, ALB, Target Groups, TaskDefinition and Service'
 
 Parameters:
   Environment:
     Type: String
-    Description: Environment name
+    Description: Environment name (affects resource tags/names)
     Default: production
     AllowedValues:
       - development
@@ -39,7 +38,7 @@ Parameters:
 
   ContainerPort:
     Type: Number
-    Description: Port on which the application runs
+    Description: Port on which the application container listens
     Default: 5000
 
   DesiredCount:
@@ -59,8 +58,18 @@ Parameters:
     Default: 512
     AllowedValues: [512, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]
 
+  ECSClusterName:
+    Type: String
+    Description: ECS cluster name
+    Default: sample-app-cluster
+
+  ECSServiceName:
+    Type: String
+    Description: ECS service name
+    Default: sample-app-service
+
 Resources:
-  # VPC Configuration
+  ### Networking / VPC
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -73,7 +82,6 @@ Resources:
         - Key: Environment
           Value: !Ref Environment
 
-  # Internet Gateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -87,7 +95,6 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public Subnets
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -110,7 +117,6 @@ Resources:
         - Key: Name
           Value: !Sub 'phoenix-public-subnet-2-${Environment}'
 
-  # Private Subnets
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -131,7 +137,6 @@ Resources:
         - Key: Name
           Value: !Sub 'phoenix-private-subnet-2-${Environment}'
 
-  # NAT Gateways
   NatGateway1EIP:
     Type: AWS::EC2::EIP
     DependsOn: AttachGateway
@@ -156,7 +161,6 @@ Resources:
       AllocationId: !GetAtt NatGateway2EIP.AllocationId
       SubnetId: !Ref PublicSubnet2
 
-  # Route Tables
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -227,11 +231,10 @@ Resources:
       RouteTableId: !Ref PrivateRouteTable2
       SubnetId: !Ref PrivateSubnet2
 
-  # Security Groups
+  ### Security Groups
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub 'phoenix-alb-sg-${Environment}'
       GroupDescription: Security group for Application Load Balancer
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -250,7 +253,6 @@ Resources:
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: !Sub 'phoenix-ecs-sg-${Environment}'
       GroupDescription: Security group for ECS tasks
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -262,7 +264,7 @@ Resources:
         - Key: Name
           Value: !Sub 'phoenix-ecs-sg-${Environment}'
 
-  # Application Load Balancer
+  ### ALB + Target Groups + Listener
   ApplicationLoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
@@ -279,7 +281,6 @@ Resources:
         - Key: Name
           Value: !Sub 'phoenix-alb-${Environment}'
 
-  # Target Groups for Blue-Green Deployment
   TargetGroupBlue:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -296,7 +297,7 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher:
-        HttpCode: 200
+        HttpCode: '200'
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-tg-blue-${Environment}'
@@ -317,12 +318,11 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher:
-        HttpCode: 200
+        HttpCode: '200'
       Tags:
         - Key: Name
           Value: !Sub 'phoenix-tg-green-${Environment}'
 
-  # ALB Listener
   ALBListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -333,11 +333,11 @@ Resources:
       Port: 80
       Protocol: HTTP
 
-  # ECS Cluster
+  ### ECS cluster, task roles and task definition
   ECSCluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: sample-app-cluster
+      ClusterName: !Ref ECSClusterName
       CapacityProviders:
         - FARGATE
         - FARGATE_SPOT
@@ -353,7 +353,6 @@ Resources:
         - Key: Name
           Value: !Sub 'phoenix-cluster-${Environment}'
 
-  # ECS Task Execution Role
   ECSTaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -383,7 +382,6 @@ Resources:
                   - logs:PutLogEvents
                 Resource: '*'
 
-  # ECS Task Role
   ECSTaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -407,14 +405,12 @@ Resources:
                   - logs:PutLogEvents
                 Resource: '*'
 
-  # CloudWatch Log Group
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /ecs/sample-app
       RetentionInDays: 7
 
-  # ECS Task Definition
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -452,12 +448,11 @@ Resources:
             Retries: 3
             StartPeriod: 60
 
-  # ECS Service
   ECSService:
     Type: AWS::ECS::Service
     DependsOn: ALBListener
     Properties:
-      ServiceName: sample-app-service
+      ServiceName: !Ref ECSServiceName
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref TaskDefinition
       DesiredCount: !Ref DesiredCount
@@ -496,4 +491,56 @@ Outputs:
     Description: ECS Cluster Name
     Value: !Ref ECSCluster
     Export:
-      Name: !Sub '${AWS::
+      Name: !Sub '${AWS::StackName}-ClusterName'
+
+  ServiceName:
+    Description: ECS Service Name
+    Value: !GetAtt ECSService.Name
+    Export:
+      Name: !Sub '${AWS::StackName}-ServiceName'
+
+  LoadBalancerDNS:
+    Description: DNS name of the load balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-LoadBalancerDNS'
+
+  TargetGroupBlueArn:
+    Description: ARN of Blue Target Group
+    Value: !Ref TargetGroupBlue
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupBlue'
+
+  TargetGroupGreenArn:
+    Description: ARN of Green Target Group
+    Value: !Ref TargetGroupGreen
+    Export:
+      Name: !Sub '${AWS::StackName}-TargetGroupGreen'
+
+  TaskDefinitionArn:
+    Description: ARN of the task definition
+    Value: !Ref TaskDefinition
+    Export:
+      Name: !Sub '${AWS::StackName}-TaskDefinition'
+
+  ECSSecurityGroupId:
+    Description: Security Group ID for ECS tasks
+    Value: !Ref ECSSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-ECSSecurityGroup'
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnet1'
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub '${AWS::StackName}-PrivateSubnet2'
+
+  ApplicationURL:
+    Description: URL to access the application (HTTP)
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
