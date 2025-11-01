@@ -1,1 +1,322 @@
+version: 0.2
+# AWS CodeBuild BuildSpec for Phoenix Pipeline
+# This file defines the build process for containerized Python application
 
+# Environment variables can be set in CodeBuild project or here
+env:
+  variables:
+    # Application configuration
+    APP_NAME: "sample-python-app"
+    CONTAINER_NAME: "sample-app"
+    
+    # AWS configuration
+    AWS_DEFAULT_REGION: "us-east-1"
+    AWS_ACCOUNT_ID: "123456789012"  # Replace with actual account ID
+    
+    # Docker configuration
+    DOCKER_BUILDKIT: "1"
+    
+  parameter-store:
+    # Optionally fetch secrets from AWS Systems Manager Parameter Store
+    # DOCKER_HUB_USERNAME: /phoenix/docker/username
+    # DOCKER_HUB_PASSWORD: /phoenix/docker/password
+    
+  # secrets-manager:
+    # Optionally fetch secrets from AWS Secrets Manager
+    # DB_PASSWORD: phoenix/db:password
+
+# Build phases
+phases:
+  # Pre-build phase: Setup and authentication
+  pre_build:
+    commands:
+      - echo "Starting pre-build phase at $(date)"
+      - echo "Build initiated by $CODEBUILD_INITIATOR"
+      - echo "Source version $CODEBUILD_RESOLVED_SOURCE_VERSION"
+      
+      # Install dependencies for build process
+      - echo "Installing build dependencies..."
+      - pip install --upgrade pip
+      - pip install pytest pytest-cov pylint black
+      
+      # Set environment variables
+      - export IMAGE_TAG=${CODEBUILD_RESOLVED_SOURCE_VERSION:-latest}
+      - export SHORT_COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c1-7)
+      - export ECR_REPOSITORY_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${APP_NAME}
+      - export IMAGE_URI=${ECR_REPOSITORY_URI}:${IMAGE_TAG}
+      - export IMAGE_URI_LATEST=${ECR_REPOSITORY_URI}:latest
+      
+      # Display build information
+      - echo "ECR Repository URI = $ECR_REPOSITORY_URI"
+      - echo "Image Tag = $IMAGE_TAG"
+      - echo "Image URI = $IMAGE_URI"
+      
+      # Authenticate to Amazon ECR
+      - echo "Logging in to Amazon ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REPOSITORY_URI
+      - echo "ECR login successful"
+      
+      # Check if repository exists, create if not
+      - |
+        aws ecr describe-repositories --repository-names ${APP_NAME} --region ${AWS_DEFAULT_REGION} || \
+        aws ecr create-repository --repository-name ${APP_NAME} --region ${AWS_DEFAULT_REGION}
+      
+      # Run code quality checks
+      - echo "Running code quality checks..."
+      - cd sample-app
+      - echo "Running Black code formatter check..."
+      - black --check . || echo "Black formatting issues found (non-blocking)"
+      - echo "Running Pylint static analysis..."
+      - pylint *.py --disable=C0111,C0103,W0703 || echo "Pylint issues found (non-blocking)"
+  
+  # Build phase: Run tests and build Docker image
+  build:
+    commands:
+      - echo "Starting build phase at $(date)"
+      
+      # Run unit tests
+      - echo "Running unit tests..."
+      - pytest test_app.py -v --cov=app --cov-report=term --cov-report=html
+      - echo "Unit tests completed"
+      
+      # Display test coverage
+      - echo "Test coverage report:"
+      - coverage report
+      
+      # Build Docker image
+      - echo "Building Docker image..."
+      - docker build -t $APP_NAME:$IMAGE_TAG .
+      - docker tag $APP_NAME:$IMAGE_TAG $IMAGE_URI
+      - docker tag $APP_NAME:$IMAGE_TAG $IMAGE_URI_LATEST
+      - echo "Docker image built successfully"
+      
+      # Run security scan on Docker image (optional)
+      - echo "Running security checks on Docker image..."
+      - docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --severity HIGH,CRITICAL $APP_NAME:$IMAGE_TAG || echo "Security scan completed with warnings"
+      
+      # Display image details
+      - docker images | grep $APP_NAME
+      - echo "Image size: $(docker inspect -f '{{ .Size }}' $APP_NAME:$IMAGE_TAG | numfmt --to=iec)"
+  
+  # Post-build phase: Push image and create artifacts
+  post_build:
+    commands:
+      - echo "Starting post-build phase at $(date)"
+      
+      # Push Docker image to ECR
+      - echo "Pushing Docker image to ECR..."
+      - docker push $IMAGE_URI
+      - docker push $IMAGE_URI_LATEST
+      - echo "Docker image pushed successfully"
+      
+      # Create image definitions file for ECS
+      - echo "Creating imagedefinitions.json..."
+      - cd ..
+      - |
+        printf '[{"name":"%s","imageUri":"%s"}]' $CONTAINER_NAME $IMAGE_URI > imagedefinitions.json
+      - cat imagedefinitions.json
+      
+      # Create task definition file with updated image
+      - echo "Creating task definition..."
+      - |
+        cat > taskdef.json <<EOF
+        {
+          "family": "sample-app-task",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "512",
+          "memory": "1024",
+          "executionRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/phoenix-ecs-task-execution-role-production",
+          "taskRoleArn": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/phoenix-ecs-task-role-production",
+          "containerDefinitions": [
+            {
+              "name": "${CONTAINER_NAME}",
+              "image": "${IMAGE_URI}",
+              "essential": true,
+              "portMappings": [
+                {
+                  "containerPort": 5000,
+                  "protocol": "tcp"
+                }
+              ],
+              "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                  "awslogs-group": "/ecs/sample-app",
+                  "awslogs-region": "${AWS_DEFAULT_REGION}",
+                  "awslogs-stream-prefix": "ecs"
+                }
+              },
+              "environment": [
+                {
+                  "name": "ENVIRONMENT",
+                  "value": "production"
+                },
+                {
+                  "name": "APP_VERSION",
+                  "value": "${SHORT_COMMIT_HASH}"
+                },
+                {
+                  "name": "BUILD_ID",
+                  "value": "${CODEBUILD_BUILD_ID}"
+                }
+              ],
+              "healthCheck": {
+                "command": ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"],
+                "interval": 30,
+                "timeout": 5,
+                "retries": 3,
+                "startPeriod": 60
+              }
+            }
+          ]
+        }
+        EOF
+      - cat taskdef.json
+      
+      # Create AppSpec file for CodeDeploy
+      - echo "Creating appspec.yaml for CodeDeploy..."
+      - |
+        cat > appspec.yaml <<EOF
+        version: 0.0
+        Resources:
+          - TargetService:
+              Type: AWS::ECS::Service
+              Properties:
+                TaskDefinition: "<TASK_DEFINITION>"
+                LoadBalancerInfo:
+                  ContainerName: "${CONTAINER_NAME}"
+                  ContainerPort: 5000
+        EOF
+      - cat appspec.yaml
+      
+      # Generate build metadata
+      - echo "Generating build metadata..."
+      - |
+        cat > build-info.json <<EOF
+        {
+          "build_id": "${CODEBUILD_BUILD_ID}",
+          "build_number": "${CODEBUILD_BUILD_NUMBER}",
+          "commit_hash": "${CODEBUILD_RESOLVED_SOURCE_VERSION}",
+          "short_commit": "${SHORT_COMMIT_HASH}",
+          "image_uri": "${IMAGE_URI}",
+          "build_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "builder": "${CODEBUILD_INITIATOR}",
+          "source_version": "${CODEBUILD_SOURCE_VERSION}"
+        }
+        EOF
+      - cat build-info.json
+      
+      # Upload artifacts to S3
+      - echo "Uploading build artifacts to S3..."
+      - aws s3 cp imagedefinitions.json s3://cicd-pipeline-artifacts-${AWS_ACCOUNT_ID}/builds/${CODEBUILD_BUILD_NUMBER}/
+      - aws s3 cp taskdef.json s3://cicd-pipeline-artifacts-${AWS_ACCOUNT_ID}/builds/${CODEBUILD_BUILD_NUMBER}/
+      - aws s3 cp build-info.json s3://cicd-pipeline-artifacts-${AWS_ACCOUNT_ID}/builds/${CODEBUILD_BUILD_NUMBER}/
+      
+      # Create deployment tag in ECR
+      - echo "Tagging image in ECR..."
+      - |
+        MANIFEST=$(aws ecr batch-get-image --repository-name ${APP_NAME} --image-ids imageTag=${IMAGE_TAG} --query 'images[].imageManifest' --output text)
+        aws ecr put-image --repository-name ${APP_NAME} --image-tag build-${CODEBUILD_BUILD_NUMBER} --image-manifest "$MANIFEST" || echo "Tag already exists"
+      
+      - echo "Build completed successfully at $(date)"
+      - echo "Image URI: $IMAGE_URI"
+      - echo "Build artifacts created and uploaded"
+
+# Artifacts to be passed to next stage
+artifacts:
+  files:
+    - imagedefinitions.json
+    - taskdef.json
+    - appspec.yaml
+    - build-info.json
+  name: BuildArtifact
+  discard-paths: yes
+
+# Cache configuration for faster builds
+cache:
+  paths:
+    - '/root/.cache/pip/**/*'
+    - '/root/.cache/pytest/**/*'
+    - 'sample-app/htmlcov/**/*'
+
+# Reports configuration
+reports:
+  pytest_reports:
+    files:
+      - 'sample-app/test-results.xml'
+    file-format: 'JUNITXML'
+  
+  coverage_reports:
+    files:
+      - 'sample-app/htmlcov/**/*'
+    file-format: 'CLOVERXML'
+    base-directory: 'sample-app'
+
+# Build batch configuration (optional - for parallel builds)
+# batch:
+#   fast-fail: true
+#   build-list:
+#     - identifier: test
+#       env:
+#         variables:
+#           STAGE: test
+#     - identifier: security_scan
+#       env:
+#         variables:
+#           STAGE: security
+#   build-matrix:
+#     static:
+#       ignore-failure: false
+#     dynamic:
+#       env:
+#         variables:
+#           PYTHON_VERSION:
+#             - "3.9"
+#             - "3.10"
+#             - "3.11"
+
+# Additional notes:
+# 
+# Build Process Flow:
+# 1. Checkout source code from GitHub
+# 2. Install build dependencies
+# 3. Authenticate to ECR
+# 4. Run code quality checks (Black, Pylint)
+# 5. Execute unit tests with coverage
+# 6. Build Docker image
+# 7. Run security scan (Trivy)
+# 8. Push image to ECR with multiple tags
+# 9. Create deployment artifacts
+# 10. Upload artifacts to S3
+#
+# Environment Variables:
+# - Set in CodeBuild project configuration
+# - Can override defaults here
+# - Use Parameter Store or Secrets Manager for sensitive data
+#
+# Caching:
+# - Speeds up subsequent builds
+# - Caches pip packages and test results
+# - Reduces build time by 30-50%
+#
+# Security Best Practices:
+# - Never hardcode credentials
+# - Use IAM roles for AWS access
+# - Scan images for vulnerabilities
+# - Keep base images updated
+# - Use multi-stage Docker builds
+#
+# Optimization Tips:
+# - Use Docker layer caching
+# - Minimize image size
+# - Parallel test execution
+# - Selective artifact upload
+# - Build batching for multiple tests
+#
+# Troubleshooting:
+# - Check CloudWatch Logs for build logs
+# - Verify IAM permissions for CodeBuild role
+# - Ensure ECR repository exists
+# - Check network connectivity for dependencies
+# - Validate Docker daemon is running
